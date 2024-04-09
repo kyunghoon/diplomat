@@ -80,6 +80,7 @@ fn gen_struct_header(
         }
     }
 
+    writeln!(out, "/* [ WAKKA 3 ] */")?;
     writeln!(out, "#ifdef __cplusplus")?;
     writeln!(out, "namespace capi {{")?;
     writeln!(out, "#endif")?;
@@ -106,6 +107,7 @@ fn gen_struct_header(
         &_ => unreachable!("unknown AST/HIR variant"),
     }
 
+    writeln!(out, "/* [ WAKKA 2 ] */")?;
     writeln!(out, "#ifdef __cplusplus")?;
     writeln!(out, "}} // namespace capi")?;
     writeln!(out, "#endif")?;
@@ -131,6 +133,7 @@ fn gen_struct_header(
         }
     }
 
+    writeln!(out, "/* [ WAKKA 1 ] */")?;
     writeln!(out, "#ifdef __cplusplus")?;
     writeln!(out, "namespace capi {{")?;
     writeln!(out, "extern \"C\" {{")?;
@@ -157,6 +160,7 @@ fn gen_struct_header(
 
     writeln!(out)?;
 
+    writeln!(out, "/* [ WAKKA 4 ] */")?;
     writeln!(out, "#ifdef __cplusplus")?;
     writeln!(out, "}} // extern \"C\"")?;
     writeln!(out, "}} // namespace capi")?;
@@ -185,6 +189,7 @@ fn gen_result_header(
         let mut seen_includes = HashSet::new();
         gen_includes(ok.as_ref(), in_path, env, &mut seen_includes, out)?;
         gen_includes(err.as_ref(), in_path, env, &mut seen_includes, out)?;
+        writeln!(out, "/* [ WAKKA 5 ] */")?;
         writeln!(out, "#ifdef __cplusplus")?;
         writeln!(out, "namespace capi {{")?;
         writeln!(out, "extern \"C\" {{")?;
@@ -192,6 +197,7 @@ fn gen_result_header(
 
         gen_result(typ, in_path, env, out)?;
 
+        writeln!(out, "/* [ WAKKA 6 ] */")?;
         writeln!(out, "#ifdef __cplusplus")?;
         writeln!(out, "}} // extern \"C\"")?;
         writeln!(out, "}} // namespace capi")?;

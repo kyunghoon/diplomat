@@ -2,7 +2,7 @@
 
 use super::ty::ResultType;
 use diplomat_core::hir::{
-    self, OpaqueOwner, StringEncoding, StructPathLike, Type, TypeContext, TypeId,
+    self, OpaqueOwner, StringEncoding, StructPathLike, Type, TypeContext, TypeId
 };
 use std::borrow::Cow;
 
@@ -76,10 +76,10 @@ impl<'tcx> CFormatter<'tcx> {
     }
 
     /// Format a method
-    pub fn fmt_method_name(&self, ty: TypeId, method: &hir::Method) -> String {
+    pub fn fmt_method_name(&self, ty: TypeId, method: &hir::Method, external_name: bool) -> String {
         let ty_name = self.fmt_type_name(ty);
         let method_name = method.name.as_str();
-        let put_together = format!("{ty_name}_{method_name}");
+        let put_together = if external_name { format!("{ty_name}_{method_name}") } else { method_name.to_string() };
         method.attrs.abi_rename.apply(put_together.into()).into()
     }
 
@@ -131,6 +131,11 @@ impl<'tcx> CFormatter<'tcx> {
                 let prim = self.fmt_primitive_as_c(*p);
                 format!("ref_{constness}prim_slice_{prim}").into()
             }
+            Type::Func(f) => {
+                let inputs = f.inputs.iter().map(|(i, _)| self.fmt_type_name_uniquely(i)).collect::<Vec<_>>().join("_");
+                let output = f.output.as_ref().map(|o| self.fmt_type_name_uniquely(o)).unwrap_or("void".into());
+                format!("fn_{}_{}", output, inputs).into()
+            },
             &_ => unreachable!("unknown AST/HIR variant"),
         }
     }
@@ -157,23 +162,30 @@ impl<'tcx> CFormatter<'tcx> {
     /// Get the primitive type as a C type
     pub fn fmt_primitive_as_c(&self, prim: hir::PrimitiveType) -> Cow<'static, str> {
         use diplomat_core::hir::{FloatType, IntSizeType, IntType, PrimitiveType};
-        let s = match prim {
-            PrimitiveType::Bool => "bool",
-            PrimitiveType::Char => "char32_t",
-            PrimitiveType::Int(IntType::I8) => "int8_t",
-            PrimitiveType::Int(IntType::U8) | PrimitiveType::Byte => "uint8_t",
-            PrimitiveType::Int(IntType::I16) => "int16_t",
-            PrimitiveType::Int(IntType::U16) => "uint16_t",
-            PrimitiveType::Int(IntType::I32) => "int32_t",
-            PrimitiveType::Int(IntType::U32) => "uint32_t",
-            PrimitiveType::Int(IntType::I64) => "int64_t",
-            PrimitiveType::Int(IntType::U64) => "uint64_t",
+        match prim {
+            PrimitiveType::Bool => "bool".into(),
+            PrimitiveType::Char => "char32_t".into(),
+            PrimitiveType::Int(IntType::I8) => "int8_t".into(),
+            PrimitiveType::Int(IntType::U8) | PrimitiveType::Byte => "uint8_t".into(),
+            PrimitiveType::Int(IntType::I16) => "int16_t".into(),
+            PrimitiveType::Int(IntType::U16) => "uint16_t".into(),
+            PrimitiveType::Int(IntType::I32) => "int32_t".into(),
+            PrimitiveType::Int(IntType::U32) => "uint32_t".into(),
+            PrimitiveType::Int(IntType::I64) => "int64_t".into(),
+            PrimitiveType::Int(IntType::U64) => "uint64_t".into(),
             PrimitiveType::Int128(_) => panic!("i128 not supported in C"),
-            PrimitiveType::IntSize(IntSizeType::Isize) => "intptr_t",
-            PrimitiveType::IntSize(IntSizeType::Usize) => "size_t",
-            PrimitiveType::Float(FloatType::F32) => "float",
-            PrimitiveType::Float(FloatType::F64) => "double",
-        };
-        s.into()
+            PrimitiveType::IntSize(IntSizeType::Isize) => "intptr_t".into(),
+            PrimitiveType::IntSize(IntSizeType::Usize) => "size_t".into(),
+            PrimitiveType::Float(FloatType::F32) => "float".into(),
+            PrimitiveType::Float(FloatType::F64) => "double".into(),
+        }
     }
+
+    pub fn fmt_function_as_c(&self, param_name: Option<&str>, output: &Cow<'_, str>, inputs: &Vec<(Cow<'_, str>, Option<Cow<'_, str>>)>) -> Cow<'_, str> {
+        format!("{}(*{})({})", output, param_name.unwrap_or_default(), inputs.iter().map(|(ty, id)| match id {
+            Some(id) => format!("{} {}", ty, id),
+            None => format!("{}", ty),
+        }).collect::<Vec<_>>().join(", ")).into()
+    }
+
 }

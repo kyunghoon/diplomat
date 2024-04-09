@@ -1,0 +1,17 @@
+inline void {{ l.method_name }}${{ l.param_name -}}(void* $ctx
+	{%- for param in l.c_param_decls -%}
+		, {{ param.type_name }}{% if !param.var_name.is_empty() %} {% endif %}{{ param.var_name }}
+	{%- endfor -%}
+) {
+    (({{l.return_val}}(*)(
+        {%- for param in l.param_decls %}
+            {%- if !loop.first %}, {% endif -%}
+            {{ param.type_name }}{% if !param.var_name.is_empty() %} {% endif %}{{ param.var_name }}
+        {%- endfor -%}
+    ))($ctx))(
+    {%- for b in l.body %}
+		{%- if !loop.first %}, {% endif -%}
+        {{b}}
+    {%- endfor -%}
+    );
+}

@@ -5,7 +5,7 @@ inline {##}
 (
 	{%- for param in m.param_decls %}
 		{%- if !loop.first %}, {% endif -%}
-		{{ param.type_name }} {{ param.var_name }}
+		{{ param.type_name }}{% if !param.var_name.is_empty() %} {% endif %}{{ param.var_name }}
 	{%- endfor -%}
 )
 {%- for qualifier in m.post_qualifiers %} {{qualifier}}{% endfor %};

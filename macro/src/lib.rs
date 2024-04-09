@@ -13,104 +13,182 @@ fn cfgs_to_stream(attrs: &[Attribute]) -> proc_macro2::TokenStream {
         .fold(quote!(), |prev, attr| quote!(#prev #attr))
 }
 
-fn gen_params_at_boundary(param: &ast::Param, expanded_params: &mut Vec<FnArg>) {
-    match &param.ty {
-        ast::TypeName::StrReference(
-            ..,
-            ast::StringEncoding::UnvalidatedUtf8
-            | ast::StringEncoding::UnvalidatedUtf16
-            | ast::StringEncoding::Utf8,
-        )
-        | ast::TypeName::PrimitiveSlice(..)
-        | ast::TypeName::StrSlice(..) => {
-            let data_type = if let ast::TypeName::PrimitiveSlice(.., prim) = &param.ty {
-                ast::TypeName::Primitive(*prim).to_syn().to_token_stream()
-            } else if let ast::TypeName::StrReference(
-                _,
-                ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::Utf8,
-            ) = &param.ty
-            {
-                quote! { u8 }
-            } else if let ast::TypeName::StrReference(_, ast::StringEncoding::UnvalidatedUtf16) =
-                &param.ty
-            {
-                quote! { u16 }
-            } else if let ast::TypeName::StrSlice(
-                ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::Utf8,
-            ) = &param.ty
-            {
-                // TODO: this is not an ABI-stable type!
-                quote! { &[u8] }
-            } else if let ast::TypeName::StrSlice(ast::StringEncoding::UnvalidatedUtf16) = &param.ty
-            {
-                quote! { &[u16] }
-            } else {
-                unreachable!()
-            };
-            expanded_params.push(FnArg::Typed(PatType {
-                attrs: vec![],
-                pat: Box::new(Pat::Ident(PatIdent {
-                    attrs: vec![],
-                    by_ref: None,
-                    mutability: None,
-                    ident: Ident::new(&format!("{}_diplomat_data", param.name), Span::call_site()),
-                    subpat: None,
-                })),
-                colon_token: syn::token::Colon(Span::call_site()),
-                ty: Box::new(
-                    parse2({
-                        if let ast::TypeName::PrimitiveSlice(
-                            Some((_, ast::Mutability::Mutable)) | None,
-                            _,
-                        )
-                        | ast::TypeName::StrReference(None, ..) = &param.ty
-                        {
-                            quote! { *mut #data_type }
-                        } else {
+fn gen_params_at_boundary(ty: &ast::TypeName, name: &ast::Ident, mut on_expanded_params: impl FnMut(Type, Ident)) {
+    // recursively calling `gen_params_at_boundary` stackoverflows when using `ast::TypeName::Function`. using the aux function as a workaround.
+    fn gen_params_at_boundary_aux(ty: &ast::TypeName, name: &ast::Ident, mut on_expanded_closure_params: impl FnMut(Type, Ident)) {
+        match ty {
+            ast::TypeName::StrReference(
+                .., ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::UnvalidatedUtf16 | ast::StringEncoding::Utf8)
+            | ast::TypeName::PrimitiveSlice(..)
+            | ast::TypeName::StrSlice(..) => {
+                let data_type = match ty {
+                    ast::TypeName::PrimitiveSlice(.., prim) =>
+                        ast::TypeName::Primitive(*prim).to_syn().to_token_stream(),
+                    ast::TypeName::StrReference(_, ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::Utf8) =>
+                        quote! { u8 },
+                    ast::TypeName::StrReference(_, ast::StringEncoding::UnvalidatedUtf16) =>
+                        quote! { u16 },
+                    ast::TypeName::StrSlice(ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::Utf8) =>
+                        // TODO: this is not an ABI-stable type!
+                        quote! { &[u8] },
+                    ast::TypeName::StrSlice(ast::StringEncoding::UnvalidatedUtf16) =>
+                        quote! { &[u16] },
+                    _ => unreachable!()
+                };
+                on_expanded_closure_params(
+                    parse2(match ty {
+                        ast::TypeName::PrimitiveSlice(Some((_, ast::Mutability::Mutable)) | None, _)
+                        | ast::TypeName::StrReference(None, ..) =>
+                            quote! { *mut #data_type },
+                        _ =>
                             quote! { *const #data_type }
-                        }
                     })
                     .unwrap(),
-                ),
-            }));
+                    Ident::new(&format!("{}_diplomat_data", name), Span::call_site())
+                );
 
-            expanded_params.push(FnArg::Typed(PatType {
-                attrs: vec![],
-                pat: Box::new(Pat::Ident(PatIdent {
-                    attrs: vec![],
-                    by_ref: None,
-                    mutability: None,
-                    ident: Ident::new(&format!("{}_diplomat_len", param.name), Span::call_site()),
-                    subpat: None,
-                })),
-                colon_token: syn::token::Colon(Span::call_site()),
-                ty: Box::new(
-                    parse2(quote! {
-                        usize
-                    })
-                    .unwrap(),
-                ),
-            }));
+                on_expanded_closure_params(
+                    parse2(quote! { usize })
+                        .unwrap(),
+                    Ident::new(&format!("{}_diplomat_len", name), Span::call_site())
+                );
+            }
+            o => on_expanded_closure_params(
+                o.to_syn(),
+                Ident::new(name.as_str(), Span::call_site())
+            )
         }
-        o => {
-            expanded_params.push(FnArg::Typed(PatType {
-                attrs: vec![],
-                pat: Box::new(Pat::Ident(PatIdent {
-                    attrs: vec![],
-                    by_ref: None,
-                    mutability: None,
-                    ident: Ident::new(param.name.as_str(), Span::call_site()),
-                    subpat: None,
-                })),
-                colon_token: syn::token::Colon(Span::call_site()),
-                ty: Box::new(o.to_syn()),
-            }));
+    }
+    match ty {
+        ast::TypeName::Function(inputs, output) => {
+            let expanded_inputs = inputs.iter().enumerate().map(|(i, (input_ty, input_name))| {
+                let mut exp_inputs: Vec<Type> = vec![];
+                if i == 0 {
+                    exp_inputs.push(parse_quote! { *mut std::ffi::c_void });
+                }
+                gen_params_at_boundary_aux(input_ty, input_name.as_ref().unwrap_or(name), |exp_ty, _|
+                    exp_inputs.push(exp_ty)
+                );
+                exp_inputs
+            }).flatten().collect::<Vec<_>>();
+            let expanded_output = output.to_syn();
+            on_expanded_params(
+                parse2(quote! { extern "C" fn(#(#expanded_inputs),*) -> #expanded_output }).unwrap(),
+                Ident::new(name.as_str(), Span::call_site())
+            );
+            on_expanded_params(
+                parse2(quote! { * mut std::ffi::c_void }).unwrap(),
+                Ident::new("_ctx", Span::call_site())
+
+            );
         }
+        o =>
+            gen_params_at_boundary_aux(o, name, on_expanded_params)
     }
 }
 
 fn gen_params_invocation(param: &ast::Param, expanded_params: &mut Vec<Expr>) {
     match &param.ty {
+        ast::TypeName::Function(inputs, output) => {
+            let closure = Expr::Closure(ExprClosure {
+                attrs: vec![],
+                lifetimes: None,
+                constness: None,
+                movability: None,
+                asyncness: None,
+                capture: Some(Token![move](Span::call_site())),
+                or1_token: Token![|](Span::call_site()),
+                inputs: {
+                    let mut puncs = punctuated::Punctuated::default();
+                    inputs.iter().enumerate().for_each(|(index, (_, input_name))| {
+                        puncs.push(Pat::Ident(PatIdent {
+                            attrs: vec![],
+                            by_ref: None,
+                            mutability: None,
+                            ident: input_name.as_ref().map(|n| Ident::new(n.as_str(), Span::call_site()))
+                                .unwrap_or_else(|| Ident::new(&format!("_{}", index), Span::call_site())).into(),
+                            subpat: None,
+                        }));
+                    });
+                    puncs
+                },
+                or2_token: Token![|](Span::call_site()),
+                output: match &**output {
+                    ast::TypeName::Unit => syn::ReturnType::Default,
+                    o => syn::ReturnType::Type(
+                        Token![->](Span::call_site()),
+                        Box::new(o.to_syn())
+                    )
+                },
+                body: Box::new(Expr::Call(ExprCall {
+                    attrs: vec![],
+                    func: Box::new(Expr::Path(ExprPath {
+                        attrs: vec![],
+                        qself: None,
+                        path: Ident::new(param.name.as_str(), Span::call_site()).into(),
+                    })),
+                    paren_token: token::Paren(Span::call_site()),
+                    args: {
+                        let mut args = punctuated::Punctuated::default();
+
+                        // all lifted closures take an extra argument which captures the original callback
+                        args.push(Expr::Path(ExprPath {
+                            attrs: vec![],
+                            qself: None,
+                            path: Ident::new("_ctx", Span::call_site()).into()
+                        }));
+
+                        inputs.iter().enumerate().for_each(|(index, (input_ty, input_name))| {
+                            let path = input_name.as_ref().map(|n| Ident::new(n.as_str(), Span::call_site()))
+                                .unwrap_or_else(|| Ident::new(&format!("_{}", index), Span::call_site()));
+
+
+                            match input_ty {
+                                ast::TypeName::StrReference(
+                                    .., ast::StringEncoding::UnvalidatedUtf8 | ast::StringEncoding::UnvalidatedUtf16 | ast::StringEncoding::Utf8
+                                ) | ast::TypeName::PrimitiveSlice(..) | ast::TypeName::StrSlice(..) => {
+                                    args.push(Expr::MethodCall(ExprMethodCall {
+                                        attrs: vec![],
+                                        receiver: Box::new(Expr::Path(ExprPath {
+                                            attrs: vec![],
+                                            qself: None,
+                                            path: path.clone().into(),
+                                        })),
+                                        dot_token: Token![.](Span::call_site()),
+                                        method: Ident::new("as_ptr", Span::call_site()),
+                                        turbofish: None,
+                                        paren_token: token::Paren(Span::call_site()),
+                                        args: Default::default(),
+                                    }));
+                                    args.push(Expr::MethodCall(ExprMethodCall {
+                                        attrs: vec![],
+                                        receiver: Box::new(Expr::Path(ExprPath {
+                                            attrs: vec![],
+                                            qself: None,
+                                            path: path.clone().into(),
+                                        })),
+                                        dot_token: Token![.](Span::call_site()),
+                                        method: Ident::new("len", Span::call_site()),
+                                        turbofish: None,
+                                        paren_token: token::Paren(Span::call_site()),
+                                        args: Default::default(),
+                                    }));
+                                }
+                                _ => {
+                                    args.push(Expr::Path(ExprPath {
+                                        attrs: vec![],
+                                        qself: None,
+                                        path: path.into(),
+                                    }));
+                                }
+                            }
+                        });
+                        args
+                    }
+                }))
+            });
+            expanded_params.push(closure);
+        }
         ast::TypeName::StrReference(..)
         | ast::TypeName::PrimitiveSlice(..)
         | ast::TypeName::StrSlice(..) => {
@@ -202,21 +280,17 @@ fn gen_params_invocation(param: &ast::Param, expanded_params: &mut Vec<Expr>) {
     }
 }
 
-fn gen_custom_type_method(strct: &ast::CustomType, m: &ast::Method) -> Item {
-    let self_ident = Ident::new(strct.name().as_str(), Span::call_site());
-    let method_ident = Ident::new(m.name.as_str(), Span::call_site());
-    let extern_ident = Ident::new(m.full_path_name.as_str(), Span::call_site());
+fn gen_custom_type_this_ident() -> Pat {
+    Pat::Ident(PatIdent {
+        attrs: vec![],
+        by_ref: None,
+        mutability: None,
+        ident: Ident::new("this", Span::call_site()),
+        subpat: None,
+    })
+}
 
-    let mut all_params = vec![];
-    m.params.iter().for_each(|p| {
-        gen_params_at_boundary(p, &mut all_params);
-    });
-
-    let mut all_params_invocation = vec![];
-    m.params.iter().for_each(|p| {
-        gen_params_invocation(p, &mut all_params_invocation);
-    });
-
+fn gen_custom_type_all_params(m: &ast::Method) -> Vec<FnArg> {
     let this_ident = Pat::Ident(PatIdent {
         attrs: vec![],
         by_ref: None,
@@ -225,25 +299,100 @@ fn gen_custom_type_method(strct: &ast::CustomType, m: &ast::Method) -> Item {
         subpat: None,
     });
 
+    let mut all_params = vec![];
+    m.params.iter().for_each(|p| {
+        gen_params_at_boundary(&p.ty, &p.name, |ty, ident| all_params.push(FnArg::Typed(PatType {
+            attrs: vec![],
+            pat: Box::new(Pat::Ident(PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: None,
+                ident,
+                subpat: None,
+            })),
+            colon_token: syn::token::Colon(Span::call_site()),
+            ty: Box::new(ty),
+        })));
+    });
+
     if let Some(self_param) = &m.self_param {
         all_params.insert(
             0,
             FnArg::Typed(PatType {
                 attrs: vec![],
-                pat: Box::new(this_ident.clone()),
+                pat: Box::new(this_ident),
                 colon_token: syn::token::Colon(Span::call_site()),
                 ty: Box::new(self_param.to_typename().to_syn()),
             }),
         );
     }
 
+    all_params
+}
+
+fn gen_custom_type_field(m: &ast::Method) -> proc_macro2::TokenStream {
+    let all_params = gen_custom_type_all_params(m);
+
+    let mut all_params_invocation = vec![];
+    m.params.iter().for_each(|p| {
+        gen_params_invocation(p, &mut all_params_invocation);
+    });
+
     let lifetimes = {
         let lifetime_env = &m.lifetime_env;
-        if lifetime_env.is_empty() {
-            quote! {}
+        if lifetime_env.is_empty() { quote! {} } else { quote! { for<#lifetime_env> } }
+    };
+
+    let return_tokens = if let Some(return_type) = &m.return_type {
+        if let ast::TypeName::Result(ok, err, true) = return_type {
+            let ok = ok.to_syn();
+            let err = err.to_syn();
+            quote! { -> diplomat_runtime::DiplomatResult<#ok, #err> }
+        } else if let ast::TypeName::Ordering = return_type {
+            let return_type_syn = return_type.to_syn();
+            quote! { -> #return_type_syn }
+        } else if let ast::TypeName::Option(ty) = return_type {
+            match ty.as_ref() {
+                // pass by reference, Option becomes null
+                ast::TypeName::Box(..) | ast::TypeName::Reference(..) => {
+                    let return_type_syn = return_type.to_syn();
+                    quote! { -> #return_type_syn }
+                }
+                // anything else goes through DiplomatResult
+                _ => {
+                    let ty = ty.to_syn();
+                    quote! { -> diplomat_runtime::DiplomatResult<#ty, ()> }
+                }
+            }
         } else {
-            quote! { <#lifetime_env> }
+            let return_type_syn = return_type.to_syn();
+            quote! { -> #return_type_syn }
         }
+    } else {
+        quote! {}
+    };
+
+    syn::parse_quote! {
+        #lifetimes extern "C" fn(#(#all_params),*) #return_tokens
+    }
+}
+
+fn gen_custom_type_method(strct: &ast::CustomType, m: &ast::Method) -> Item {
+    let self_ident = Ident::new(strct.name().as_str(), Span::call_site());
+    let method_ident = Ident::new(m.name.as_str(), Span::call_site());
+    let extern_ident = Ident::new(m.full_path_name.as_str(), Span::call_site());
+
+    let this_ident = gen_custom_type_this_ident();
+    let all_params = gen_custom_type_all_params(m);
+
+    let mut all_params_invocation = vec![];
+    m.params.iter().for_each(|p| {
+        gen_params_invocation(p, &mut all_params_invocation);
+    });
+
+    let lifetimes = {
+        let lifetime_env = &m.lifetime_env;
+        if lifetime_env.is_empty() { quote! {} } else { quote! { <#lifetime_env> } }
     };
 
     let method_invocation = if m.self_param.is_some() {
@@ -303,7 +452,7 @@ fn gen_custom_type_method(strct: &ast::CustomType, m: &ast::Method) -> Item {
         Item::Fn(syn::parse_quote! {
             #[no_mangle]
             #cfg
-            extern "C" fn #extern_ident#lifetimes(#(#all_params),*) #return_tokens {
+            extern "C" fn #extern_ident #lifetimes(#(#all_params),*) #return_tokens {
                 #method_invocation(#(#all_params_invocation),*) #maybe_into
             }
         })
@@ -311,7 +460,7 @@ fn gen_custom_type_method(strct: &ast::CustomType, m: &ast::Method) -> Item {
         Item::Fn(syn::parse_quote! {
             #[no_mangle]
             #cfg
-            extern "C" fn #extern_ident#lifetimes(#(#all_params),*) #return_tokens {
+            extern "C" fn #extern_ident #lifetimes(#(#all_params),*) #return_tokens {
                 let ret = #method_invocation(#(#all_params_invocation),*);
                 #(#writeable_flushes)*
                 ret #maybe_into
@@ -377,7 +526,7 @@ impl AttributeInfo {
     }
 }
 
-fn gen_bridge(mut input: ItemMod) -> ItemMod {
+fn gen_bridge(mut input: ItemMod, apiname_and_rs_entrypoint: Option<(Ident, Ident)>) -> ItemMod {
     let module = ast::Module::from_syn(&input, true);
     // Clean out any diplomat attributes so Rust doesn't get mad
     let _attrs = AttributeInfo::extract(&mut input.attrs);
@@ -470,8 +619,12 @@ fn gen_bridge(mut input: ItemMod) -> ItemMod {
         new_contents.push(Item::Fn(syn::parse_quote! {
             #[no_mangle]
             #cfg
-            extern "C" fn #destroy_ident#lifetime_defs(this: Box<#type_ident#lifetimes>) {}
+            extern "C" fn #destroy_ident #lifetime_defs(this: Box<#type_ident #lifetimes>) {}
         }));
+    }
+
+    if let Some((apiname, rs_entrypoint)) = apiname_and_rs_entrypoint {
+        push_api_bridge(&module, &mut new_contents, apiname, rs_entrypoint);
     }
 
     ItemMod {
@@ -488,10 +641,53 @@ fn gen_bridge(mut input: ItemMod) -> ItemMod {
 /// Mark a module to be exposed through Diplomat-generated FFI.
 #[proc_macro_attribute]
 pub fn bridge(
-    _attr: proc_macro::TokenStream,
+    attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let expanded = gen_bridge(parse_macro_input!(input));
+    let mut apiname = None;
+    let mut refresh_api_fn = None;
+    let mut additional_includes = vec![];
+    let mut get_api_fn = None;
+
+    let args = parse_macro_input!(attr with punctuated::Punctuated::<Meta,syn::Token![,]>::parse_terminated);
+    args.into_iter().for_each(|arg| {
+        match arg {
+            Meta::NameValue(MetaNameValue { path, value, .. }) => {
+                match path.get_ident() {
+                    Some(attr) => match value {
+                        Expr::Path(ExprPath { path, .. }) => {
+                            if let Some(value) = path.get_ident() {
+                                if attr == "apiname" {
+                                    apiname = Some(Ident::new(value.to_string().as_str(), Span::call_site()));
+                                } else if attr == "refresh_api_fn" {
+                                    refresh_api_fn = Some(Ident::new(value.to_string().as_str(), Span::call_site()));
+                                } else if attr == "get_api_fn" {
+                                    get_api_fn = Some(Ident::new(value.to_string().as_str(), Span::call_site()));
+                                } else {
+                                    panic!("This macro only accepts `apiname`, `refresh_api_fn` `get_api_fn` or `additional_includes`");
+                                }
+                            } else {
+                                panic!("invalid macro attribute")
+                            }
+                        },
+                        Expr::Array(ExprArray { elems, .. }) => {
+                            elems.into_iter().for_each(|e| match e {
+                                Expr::Lit(ExprLit { lit, .. }) =>
+                                    additional_includes.push(format!("{}", lit.to_token_stream())),
+                                x  => panic!("invalid additional_includes {}", x.to_token_stream()),
+                            });
+                        },
+                        _ => panic!("invalid macro attribute value {}", value.to_token_stream()),
+                    },
+                    _ => panic!("This macro only accepts `apiname`, `refresh_api_fn` `get_api_fn` or `additional_includes`")
+                }
+            }
+            _ => panic!("invalid macro attribute")
+        }
+    });
+
+    let expanded = gen_bridge(parse_macro_input!(input), apiname.zip(refresh_api_fn));
+    //println!("[RUST]\n{}", expanded.to_token_stream());
     proc_macro::TokenStream::from(expanded.to_token_stream())
 }
 
@@ -595,7 +791,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -614,7 +810,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -633,7 +829,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -652,7 +848,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -671,7 +867,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -693,7 +889,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -712,7 +908,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -731,7 +927,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -766,7 +962,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -789,7 +985,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -809,7 +1005,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -827,7 +1023,7 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
@@ -848,9 +1044,86 @@ mod tests {
                         }
                     }
                 }
-            })
+            }, None)
             .to_token_stream()
             .to_string()
         ));
     }
+}
+
+fn push_api_bridge(module: &ast::Module, new_contents: &mut Vec<Item>, apiname: Ident, rs_entrypoint: Ident) {
+    for custom_type in module.declared_types.values() {
+        let api_struct_ident = Ident::new(&format!("__{}_API__", custom_type.name().as_str()), Span::call_site());
+        let fields = custom_type.methods().iter().map(|m| -> Field {
+            let field_ident = Ident::new(m.name.as_str(), Span::call_site());
+            let field_ty = gen_custom_type_field(m);
+            syn::parse_quote! { pub #field_ident : #field_ty }
+        }).chain(std::iter::once({
+            // add destructor
+            let destroy_ident = Ident::new(custom_type.dtor_name().as_str(), Span::call_site());
+            let type_ident = custom_type.name();
+            let (lifetime_defs, lifetimes) = match custom_type.lifetimes() { None => (quote! {}, quote! {}),
+                Some(lifetime_env) => (quote! { for<#lifetime_env> }, lifetime_env.lifetimes_to_tokens())
+            };
+            syn::parse_quote! { pub #destroy_ident : #lifetime_defs extern "C" fn(this: Box<#type_ident #lifetimes>)}
+        }));
+        new_contents.push(syn::parse_quote! {
+            #[allow(non_camel_case_types)]
+            #[allow(non_snake_case)]
+            #[repr(C)]
+            pub struct #api_struct_ident {
+                #(#fields),*
+            }
+        });
+
+        let field_idents = custom_type.methods().iter().map(|m| -> FieldValue {
+            let field_ident = Ident::new(m.name.as_str(), Span::call_site());
+            let extern_ident = Ident::new(m.full_path_name.as_str(), Span::call_site());
+            syn::parse_quote! { #field_ident : #extern_ident }
+        }).chain(std::iter::once({
+            // add destructor
+            let destroy_ident = Ident::new(custom_type.dtor_name().as_str(), Span::call_site());
+            syn::parse_quote! { #destroy_ident : #destroy_ident }
+        }));
+        let api_method_ident = Ident::new(&format!("__get_{}_api__", custom_type.name().as_str()), Span::call_site());
+        new_contents.push(syn::parse_quote! {
+            #[allow(non_snake_case)]
+            fn #api_method_ident() -> #api_struct_ident {
+                #api_struct_ident {
+                    #(#field_idents),*
+                }
+            }
+        });
+    }
+
+    let api_fields = module.declared_types.values().map(|custom_type| -> Field {
+        let api_field_ident = Ident::new(custom_type.name().as_str(), Span::call_site());
+        let api_struct_ident = Ident::new(&format!("__{}_API__", custom_type.name().as_str()), Span::call_site());
+        syn::parse_quote! {
+            pub #api_field_ident : #api_struct_ident 
+        }
+    });
+    new_contents.push(syn::parse_quote! {
+        #[allow(non_camel_case_types)]
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        pub struct #apiname {
+            #(#api_fields),*
+        }
+    });
+
+    let api_field_idents = module.declared_types.values().map(|custom_type| -> FieldValue {
+        let api_field_ident = Ident::new(custom_type.name().as_str(), Span::call_site());
+        let api_method_ident = Ident::new(&format!("__get_{}_api__", custom_type.name().as_str()), Span::call_site());
+        syn::parse_quote! { #api_field_ident : #api_method_ident() }
+    });
+
+    new_contents.push(syn::parse_quote! {
+        #[no_mangle]
+        pub extern "C" fn #rs_entrypoint() -> #apiname {
+            #apiname {
+                #(#api_field_idents),*
+            }
+        }
+    });
 }

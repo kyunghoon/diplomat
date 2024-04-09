@@ -9,8 +9,7 @@ use std::fmt;
 use std::ops::ControlFlow;
 
 use super::{
-    Attrs, Docs, Enum, Ident, Lifetime, LifetimeEnv, LifetimeTransitivity, Method, NamedLifetime,
-    OpaqueStruct, Path, RustLink, Struct,
+    Attrs, Docs, Enum, Ident, Lifetime, LifetimeEnv, LifetimeTransitivity, Method, NamedLifetime, OpaqueStruct, Path, RustLink, Struct
 };
 use crate::Env;
 
@@ -362,6 +361,8 @@ pub enum TypeName {
     ///
     /// The path must be present! Ordering will be parsed as an AST type!
     Ordering,
+    /// A function type,
+    Function(Vec<(TypeName, Option<Ident>)>, Box<TypeName>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug, Copy)]
@@ -527,6 +528,13 @@ impl TypeName {
             TypeName::Unit => syn::parse_quote! {
                 ()
             },
+            TypeName::Function(params, return_type) => {
+                let param_decls = params.iter().map(|(ty, id)| match id {
+                    Some(id) => format!("{}: {}", id, ty),
+                    None => format!("{}", ty),
+                }).collect::<Vec<_>>().join(", ");
+                syn::parse_str(&format!("extern \"C\" fn({param_decls})")).unwrap()
+            }
         }
     }
 
@@ -685,6 +693,31 @@ impl TypeName {
                     todo!("Tuples are not currently supported")
                 }
             }
+            other@syn::Type::ImplTrait(TypeImplTrait { bounds, .. }) => {
+                let mut i = bounds.iter();
+                let Some((
+                    TypeParamBound::Trait(TraitBound { path: syn::Path { segments, .. }, .. }),
+                    TypeParamBound::Lifetime(..))) = i.next().zip(i.next()) else {
+                    panic!("Unsupported type: {}", other.to_token_stream());
+                };
+                let Some(PathSegment {
+                    ident,
+                    arguments: PathArguments::Parenthesized(ParenthesizedGenericArguments { inputs, output, .. }), 
+                }) = segments.iter().next() else {
+                    panic!("Unsupported type: {}", other.to_token_stream());
+                };
+                if ident != "FnMut" && ident != "Fn" {
+                    panic!("Unsupported type: {}", other.to_token_stream());
+                }
+                let inputs = inputs.iter()
+                    .map(|ty| (TypeName::from_syn(&ty, self_path_type.clone()), None))
+                    .collect::<Vec<_>>();
+                let output = match output {
+                    ReturnType::Default => TypeName::Unit,
+                    ReturnType::Type(_, ty) => TypeName::from_syn(ty, self_path_type),
+                };
+                TypeName::Function(inputs, Box::new(output))
+            },
             other => panic!("Unsupported type: {}", other.to_token_stream()),
         }
     }
@@ -877,6 +910,10 @@ impl fmt::Display for TypeName {
             }
             TypeName::PrimitiveSlice(None, typ) => write!(f, "Box<[{typ}]>"),
             TypeName::Unit => "()".fmt(f),
+            TypeName::Function(params, return_type) => {
+                //write!(f, "extern \"C\" fn(/*2*/)")
+                unimplemented!()
+            },
         }
     }
 }

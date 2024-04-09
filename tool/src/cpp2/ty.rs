@@ -1,3 +1,5 @@
+use crate::ApiInfo;
+
 use super::header::Header;
 use super::Cpp2Context;
 use super::Cpp2Formatter;
@@ -7,9 +9,10 @@ use diplomat_core::hir::{
     Type, TypeDef, TypeId,
 };
 use std::borrow::Cow;
+use std::fmt::Write;
 
 impl<'tcx> super::Cpp2Context<'tcx> {
-    pub fn gen_ty(&self, id: TypeId, ty: TypeDef<'tcx>) {
+    pub fn gen_ty(&self, id: TypeId, ty: TypeDef<'tcx>, api_info: Option<&ApiInfo>) {
         if ty.attrs().disable {
             // Skip type if disabled
             return;
@@ -27,10 +30,10 @@ impl<'tcx> super::Cpp2Context<'tcx> {
         };
         let guard = self.errors.set_context_ty(ty.name().as_str().into());
         match ty {
-            TypeDef::Enum(o) => context.gen_enum_def(o, id),
-            TypeDef::Opaque(o) => context.gen_opaque_def(o, id),
-            TypeDef::Struct(s) => context.gen_struct_def(s, id),
-            TypeDef::OutStruct(s) => context.gen_struct_def(s, id),
+            TypeDef::Enum(o) => context.gen_enum_def(o, id, api_info),
+            TypeDef::Opaque(o) => context.gen_opaque_def(o, id, api_info),
+            TypeDef::Struct(s) => context.gen_struct_def(s, id, api_info),
+            TypeDef::OutStruct(s) => context.gen_struct_def(s, id, api_info),
             _ => unreachable!("unknown AST/HIR variant"),
         }
         drop(guard);
@@ -53,9 +56,9 @@ impl<'tcx> super::Cpp2Context<'tcx> {
         let c_impl_header_path = self.formatter.fmt_c_impl_header_path(id);
         context.impl_header.includes.insert(c_impl_header_path);
 
-        self.files
+        self.c.files
             .add_file(decl_header_path, decl_header.to_string());
-        self.files
+        self.c.files
             .add_file(impl_header_path, impl_header.to_string());
     }
 }
@@ -102,6 +105,20 @@ struct MethodInfo<'a> {
     c_to_cpp_return_expression: Option<Cow<'a, str>>,
 }
 
+/// Everyrhing needed for rendering a lifted lambda
+struct LiftedLambdaInfo<'a> {
+    /// The C++ method name
+    method_name: Cow<'a, str>,
+    /// The C++ parameter name
+    param_name: Cow<'a, str>,
+    /// Type declarations for the C++ parameters
+    param_decls: Vec<NamedType<'a>>,
+    /// Type declarations for the C parameters
+    c_param_decls: Vec<NamedType<'a>>,
+    body: Vec<Cow<'a, str>>,
+    return_val: Cow<'a, str>,
+}
+
 /// Context for generating a particular type's header
 pub struct TyGenContext<'ccx, 'tcx, 'header> {
     pub cx: &'ccx Cpp2Context<'tcx>,
@@ -116,7 +133,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     /// C enum type. This enables us to add methods to the enum and generally make the enum
     /// behave more like an upgraded C++ type. We don't use `enum class` because methods
     /// cannot be added to it.
-    pub fn gen_enum_def(&mut self, ty: &'tcx hir::EnumDef, id: TypeId) {
+    pub fn gen_enum_def(&mut self, ty: &'tcx hir::EnumDef, id: TypeId, api_info: Option<&ApiInfo>) {
         let type_name = self.cx.formatter.fmt_type_name(id);
         let type_name_unnamespaced = self.cx.formatter.fmt_type_name_unnamespaced(id);
         let ctype = self.cx.formatter.fmt_c_type_name(id);
@@ -124,7 +141,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         let methods = ty
             .methods
             .iter()
-            .flat_map(|method| self.gen_method_info(id, method))
+            .flat_map(|method| self.gen_method_info(id, method, api_info))
             .collect::<Vec<_>>();
 
         #[derive(Template)]
@@ -178,16 +195,50 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             .insert(self.cx.formatter.fmt_c_decl_header_path(id));
     }
 
-    pub fn gen_opaque_def(&mut self, ty: &'tcx hir::OpaqueDef, id: TypeId) {
+    pub fn gen_opaque_def(&mut self, ty: &'tcx hir::OpaqueDef, id: TypeId, api_info: Option<&ApiInfo>) {
         let type_name = self.cx.formatter.fmt_type_name(id);
         let type_name_unnamespaced = self.cx.formatter.fmt_type_name_unnamespaced(id);
         let ctype = self.cx.formatter.fmt_c_type_name(id);
-        let dtor_name = self.cx.formatter.fmt_c_dtor_name(id);
+        let dtor_name = self.cx.formatter.fmt_c_dtor_name(id, api_info);
 
         let methods = ty
             .methods
             .iter()
-            .flat_map(|method| self.gen_method_info(id, method))
+            .flat_map(|method| self.gen_method_info(id, method, api_info))
+            .collect::<Vec<_>>();
+
+        let lifted = methods.iter()
+            .flat_map(|m| {
+                m.method.params.iter().filter_map(move |p| match &p.ty {
+                    Type::Func(f) => Some((&p.name, f, m)),
+                    _ => None
+                })
+            })
+            .map(|(param_name, f, m)| LiftedLambdaInfo {
+                method_name: m.method_name.clone(),
+                param_name: param_name.as_str().into(),
+                param_decls: f.inputs.iter()
+                    .map(|(ty, _)|
+                        self.gen_ty_decl(ty, ""))
+                    .collect::<Vec<_>>(),
+                c_param_decls: f.inputs.iter()
+                    .enumerate()
+                    .flat_map(|(i, (ty, ident))|
+                        self.cx.c.gen_ty_decl(id, ty, ident.as_ref()
+                            .map(|i| i.as_str().into())
+                            .unwrap_or(Cow::Owned(format!("${i}")))))
+                    .map(|(type_name, var_name)|
+                        NamedType { var_name, type_name })
+                    .collect::<Vec<_>>(),
+                body: f.inputs.iter()
+                    .enumerate()
+                    .map(|(i, (ty, id))| 
+                        self.gen_c_to_cpp_expr_for_type(ty, id.as_ref()
+                            .map(|s| s.into())
+                            .unwrap_or(Cow::Owned(format!("${i}")))))
+                    .collect::<Vec<_>>(),
+                return_val: "void".into()
+            })
             .collect::<Vec<_>>();
 
         #[derive(Template)]
@@ -214,6 +265,13 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         .render_into(self.decl_header)
         .unwrap();
 
+        if let Some(info) = api_info {
+            info.additional_includes.iter().for_each(|inc| {
+                writeln!(self.impl_header, "#include \"{}\"", inc).unwrap();
+            });
+        }
+        writeln!(self.impl_header, "").unwrap();
+
         #[derive(Template)]
         #[template(path = "cpp2/opaque_impl.h.jinja", escape = "none")]
         struct ImplTemplate<'a> {
@@ -223,6 +281,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             ctype: &'a str,
             dtor_name: &'a str,
             methods: &'a [MethodInfo<'a>],
+            lifted: &'a [LiftedLambdaInfo<'a>],
         }
 
         ImplTemplate {
@@ -232,6 +291,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             ctype: &ctype,
             dtor_name: &dtor_name,
             methods: methods.as_slice(),
+            lifted: lifted.as_slice(),
         }
         .render_into(self.impl_header)
         .unwrap();
@@ -241,7 +301,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             .insert(self.cx.formatter.fmt_c_decl_header_path(id));
     }
 
-    pub fn gen_struct_def<P: TyPosition>(&mut self, def: &'tcx hir::StructDef<P>, id: TypeId) {
+    pub fn gen_struct_def<P: TyPosition>(&mut self, def: &'tcx hir::StructDef<P>, id: TypeId, api_info: Option<&ApiInfo>) {
         let type_name = self.cx.formatter.fmt_type_name(id);
         let type_name_unnamespaced = self.cx.formatter.fmt_type_name_unnamespaced(id);
         let ctype = self.cx.formatter.fmt_c_type_name(id);
@@ -267,7 +327,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         let methods = def
             .methods
             .iter()
-            .flat_map(|method| self.gen_method_info(id, method))
+            .flat_map(|method| self.gen_method_info(id, method, api_info))
             .collect::<Vec<_>>();
 
         #[derive(Template)]
@@ -325,6 +385,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         &mut self,
         id: TypeId,
         method: &'tcx hir::Method,
+        api_info: Option<&ApiInfo>,
     ) -> Option<MethodInfo<'ccx>> {
         if method.attrs.disable {
             return None;
@@ -334,7 +395,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             method.name.as_str().into(),
         );
         let method_name = self.cx.formatter.fmt_method_name(method);
-        let c_method_name = self.cx.formatter.fmt_c_method_name(id, method);
+        let c_method_name = self.cx.formatter.fmt_c_method_name(id, method, api_info);
         let mut param_decls = Vec::new();
         let mut cpp_to_c_params = Vec::new();
 
@@ -345,7 +406,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         for param in method.params.iter() {
             let decls = self.gen_ty_decl(&param.ty, param.name.as_str());
             param_decls.push(decls);
-            let conversions = self.gen_cpp_to_c_for_type(&param.ty, param.name.as_str().into());
+            let conversions = self.gen_cpp_to_c_expr_for_type(&param.ty, &method_name, param.name.as_str().into());
             cpp_to_c_params.extend(
                 conversions
                     .into_iter()
@@ -353,9 +414,11 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             );
         }
 
+
         if method.output.is_writeable() {
             cpp_to_c_params.push("&writeable".into());
         }
+
 
         let return_ty = self.gen_cpp_return_type_name(&method.output);
 
@@ -373,6 +436,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             Some(_) => vec![],
             None => vec![],
         };
+
 
         Some(MethodInfo {
             method,
@@ -392,21 +456,24 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     where
         'ccx: 'a,
     {
-        let var_name = self.cx.formatter.fmt_param_name(var_name);
-        let type_name = self.gen_type_name(ty);
-
-        NamedType {
-            var_name,
-            type_name,
+        match ty {
+            Type::Func(..) => NamedType {
+                var_name: "".into(),
+                type_name: self.gen_type_name(ty, Some(&self.cx.formatter.fmt_param_name(var_name))),
+            },
+            _ => NamedType {
+                var_name: self.cx.formatter.fmt_param_name(var_name),
+                type_name: self.gen_type_name(ty, None),
+            }
         }
     }
 
     /// Generates C++ code for referencing a particular type.
     ///
     /// This function adds the necessary type imports to the decl and impl files.
-    fn gen_type_name<P: TyPosition>(&mut self, ty: &Type<P>) -> Cow<'ccx, str> {
-        match *ty {
-            Type::Primitive(prim) => self.cx.formatter.fmt_primitive_as_c(prim),
+    fn gen_type_name<P: TyPosition>(&mut self, ty: &Type<P>, param_name: Option<&str>) -> Cow<'ccx, str> {
+        match ty {
+            Type::Primitive(prim) => self.cx.formatter.fmt_primitive_as_c(*prim),
             Type::Opaque(ref op) => {
                 let op_id = op.tcx_id.into();
                 let type_name = self.cx.formatter.fmt_type_name(op_id);
@@ -480,10 +547,10 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                 type_name
             }
             Type::Slice(hir::Slice::Str(_, encoding)) => {
-                self.cx.formatter.fmt_borrowed_str(encoding)
+                self.cx.formatter.fmt_borrowed_str(*encoding)
             }
             Type::Slice(hir::Slice::Primitive(b, p)) => {
-                let ret = self.cx.formatter.fmt_primitive_as_c(p);
+                let ret = self.cx.formatter.fmt_primitive_as_c(*p);
                 let ret = self.cx.formatter.fmt_borrowed_slice(
                     &ret,
                     b.map(|b| b.mutability).unwrap_or(hir::Mutability::Mutable),
@@ -492,9 +559,19 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             }
             Type::Slice(hir::Slice::Strs(encoding)) => format!(
                 "diplomat::span<const {}>",
-                self.cx.formatter.fmt_borrowed_str(encoding)
+                self.cx.formatter.fmt_borrowed_str(*encoding)
             )
             .into(),
+            Type::Func(f) => {
+                let output = f.output.as_ref()
+                    .map(|o| self.gen_ty_decl(&o, "void").type_name)
+                    .unwrap_or(Cow::Borrowed("void"));
+                let inputs = f.inputs.iter()
+                    .map(|(ty, _)| self.gen_ty_decl(ty, ""))
+                    .map(|i| (i.type_name, Some(i.var_name)))
+                    .collect::<Vec<_>>();
+                self.cx.formatter.fmt_function_as_c(param_name, &output, &inputs)
+            },
             _ => unreachable!("unknown AST/HIR variant"),
         }
     }
@@ -521,7 +598,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     ) -> Vec<NamedExpression<'a>> {
         let var_name = self.cx.formatter.fmt_param_name(field.name.as_str());
         let field_getter = format!("{cpp_struct_access}{var_name}");
-        self.gen_cpp_to_c_for_type(&field.ty, field_getter.into())
+        self.gen_cpp_to_c_expr_for_type(&field.ty, &var_name, field_getter.into())
             .into_iter()
             .map(
                 |PartiallyNamedExpression { suffix, expression }| NamedExpression {
@@ -536,12 +613,13 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     ///
     /// Returns `PartiallyNamedExpression`s whose `suffix` is either empty, `_data`, or `_size` for
     /// referencing fields of the C struct.
-    fn gen_cpp_to_c_for_type<'a, P: TyPosition>(
+    fn gen_cpp_to_c_expr_for_type<'a, P: TyPosition>(
         &self,
         ty: &Type<P>,
+        cpp_method_name: &Cow<'a, str>,
         cpp_name: Cow<'a, str>,
     ) -> Vec<PartiallyNamedExpression<'a>> {
-        match *ty {
+        match ty {
             Type::Primitive(..) => {
                 vec![PartiallyNamedExpression {
                     suffix: "".into(),
@@ -584,6 +662,18 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                     },
                 ]
             }
+            Type::Func(..) => {
+                vec![
+                    PartiallyNamedExpression {
+                        suffix: "".into(),
+                        expression: format!("{cpp_method_name}${cpp_name}").into(),
+                    },
+                    PartiallyNamedExpression {
+                        suffix: "".into(),
+                        expression: format!("(void*){cpp_name}").into(),
+                    }
+                ]
+            }
             _ => unreachable!("unknown AST/HIR variant"),
         }
     }
@@ -593,16 +683,16 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
         match *result_ty {
             ReturnType::Infallible(SuccessType::Unit) => "void".into(),
             ReturnType::Infallible(SuccessType::Writeable) => self.cx.formatter.fmt_owned_str(),
-            ReturnType::Infallible(SuccessType::OutType(ref o)) => self.gen_type_name(o),
+            ReturnType::Infallible(SuccessType::OutType(ref o)) => self.gen_type_name(o, Some("[5]")),
             ReturnType::Fallible(ref ok, ref err) => {
                 let ok_type_name = match ok {
                     SuccessType::Writeable => self.cx.formatter.fmt_owned_str(),
                     SuccessType::Unit => "std::monostate".into(),
-                    SuccessType::OutType(o) => self.gen_type_name(o),
+                    SuccessType::OutType(o) => self.gen_type_name(o, Some("[2]")),
                     _ => unreachable!("unknown AST/HIR variant"),
                 };
                 let err_type_name = match err {
-                    Some(o) => self.gen_type_name(o),
+                    Some(o) => self.gen_type_name(o, Some("[3]")),
                     None => "std::monostate".into(),
                 };
                 format!("diplomat::result<{ok_type_name}, {err_type_name}>").into()
@@ -611,7 +701,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                 let type_name = match ty {
                     SuccessType::Writeable => self.cx.formatter.fmt_owned_str(),
                     SuccessType::Unit => "std::monostate".into(),
-                    SuccessType::OutType(o) => self.gen_type_name(o),
+                    SuccessType::OutType(o) => self.gen_type_name(o, Some("[4]")),
                     _ => unreachable!("unknown AST/HIR variant"),
                 };
                 self.cx.formatter.fmt_optional(&type_name).into()
@@ -630,7 +720,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     ) -> NamedExpression<'a> {
         let var_name = self.cx.formatter.fmt_param_name(field.name.as_str());
         let field_getter = format!("{c_struct_access}{var_name}");
-        let expression = self.gen_c_to_cpp_for_type(&field.ty, field_getter.into());
+        let expression = self.gen_c_to_cpp_expr_for_type(&field.ty, field_getter.into());
         NamedExpression {
             var_name,
             expression,
@@ -641,7 +731,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
     ///
     /// If the type is a slice, this function assumes that `{var_name}_data` and `{var_name}_size` resolve
     /// to valid expressions referencing the two different C variables for the pointer and the length.
-    fn gen_c_to_cpp_for_type<'a, P: TyPosition>(
+    fn gen_c_to_cpp_expr_for_type<'a, P: TyPosition>(
         &self,
         ty: &Type<P>,
         var_name: Cow<'a, str>,
@@ -681,7 +771,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             }
             Type::Slice(hir::Slice::Str(_, encoding)) => {
                 let string_view = self.cx.formatter.fmt_borrowed_str(encoding);
-                format!("{string_view}({var_name}_data, {var_name}_size)").into()
+                format!("{string_view}({var_name}_data, {var_name}_len)").into()
             }
             Type::Slice(hir::Slice::Primitive(b, p)) => {
                 let prim_name = self.cx.formatter.fmt_primitive_as_c(p);
@@ -689,7 +779,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                     &prim_name,
                     b.map(|b| b.mutability).unwrap_or(hir::Mutability::Mutable),
                 );
-                format!("{span}({var_name}_data, {var_name}_size)").into()
+                format!("{span}({var_name}_data, {var_name}_len)").into()
             }
             _ => unreachable!("unknown AST/HIR variant"),
         }
@@ -707,17 +797,17 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
             ReturnType::Infallible(SuccessType::Unit) => None,
             ReturnType::Infallible(SuccessType::Writeable) => Some("output".into()),
             ReturnType::Infallible(SuccessType::OutType(ref out_ty)) => {
-                Some(self.gen_c_to_cpp_for_type(out_ty, var_name))
+                Some(self.gen_c_to_cpp_expr_for_type(out_ty, var_name))
             }
             ReturnType::Fallible(ref ok, ref err) => {
                 let ok_type_name = match ok {
                     SuccessType::Writeable => self.cx.formatter.fmt_owned_str(),
                     SuccessType::Unit => "std::monostate".into(),
-                    SuccessType::OutType(ref o) => self.gen_type_name(o),
+                    SuccessType::OutType(ref o) => self.gen_type_name(o, Some("[6]")),
                     _ => unreachable!("unknown AST/HIR variant"),
                 };
                 let err_type_name = match err {
-                    Some(o) => self.gen_type_name(o),
+                    Some(o) => self.gen_type_name(o, Some("[7]")),
                     None => "std::monostate".into(),
                 };
                 let ok_conversion = match ok {
@@ -725,12 +815,12 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                     SuccessType::Writeable => "std::move(output)".into(),
                     SuccessType::Unit => "".into(),
                     SuccessType::OutType(ref o) => {
-                        self.gen_c_to_cpp_for_type(o, format!("{var_name}.ok").into())
+                        self.gen_c_to_cpp_expr_for_type(o, format!("{var_name}.ok").into())
                     }
                     _ => unreachable!("unknown AST/HIR variant"),
                 };
                 let err_conversion = match err {
-                    Some(o) => self.gen_c_to_cpp_for_type(o, format!("{var_name}.err").into()),
+                    Some(o) => self.gen_c_to_cpp_expr_for_type(o, format!("{var_name}.err").into()),
                     None => "".into(),
                 };
                 Some(
@@ -741,7 +831,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                 let type_name = match ty {
                     SuccessType::Writeable => self.cx.formatter.fmt_owned_str(),
                     SuccessType::Unit => "std::monostate".into(),
-                    SuccessType::OutType(o) => self.gen_type_name(o),
+                    SuccessType::OutType(o) => self.gen_type_name(o, Some("[8]")),
                     _ => unreachable!("unknown AST/HIR variant"),
                 };
 
@@ -750,7 +840,7 @@ impl<'ccx, 'tcx: 'ccx, 'header> TyGenContext<'ccx, 'tcx, 'header> {
                     SuccessType::Writeable => "std::move(output)".into(),
                     SuccessType::Unit => "".into(),
                     SuccessType::OutType(ref o) => {
-                        self.gen_c_to_cpp_for_type(o, format!("{var_name}.ok").into())
+                        self.gen_c_to_cpp_expr_for_type(o, format!("{var_name}.ok").into())
                     }
                     _ => unreachable!("unknown AST/HIR variant"),
                 };

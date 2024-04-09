@@ -1,6 +1,6 @@
 //! This module contains functions for formatting types
 
-use crate::c2::CFormatter;
+use crate::{c2::CFormatter, ApiInfo};
 use diplomat_core::hir::{self, StringEncoding, TypeContext, TypeId};
 use std::borrow::Cow;
 
@@ -169,14 +169,28 @@ impl<'tcx> Cpp2Formatter<'tcx> {
         }
     }
 
-    pub fn fmt_c_method_name<'a>(&self, ty: TypeId, method: &'a hir::Method) -> Cow<'a, str> {
-        format!("capi::{}", self.c.fmt_method_name(ty, method)).into()
+    pub fn fmt_c_method_name<'a>(&self, ty: TypeId, method: &'a hir::Method, api_info: Option<&ApiInfo>) -> Cow<'a, str> {
+        if let Some(info) = api_info {
+            let ty_name = self.fmt_type_name(ty);
+            format!("{}().{}.{}", info.get_api_fn, ty_name, self.c.fmt_method_name(ty, method, false)).into()
+        } else {
+            format!("capi::{}", self.c.fmt_method_name(ty, method, true)).into()
+        }
     }
-    pub fn fmt_c_dtor_name<'a>(&self, ty: TypeId) -> Cow<'a, str> {
-        format!("capi::{}", self.c.fmt_dtor_name(ty)).into()
+    pub fn fmt_c_dtor_name<'a>(&self, ty: TypeId, api_info: Option<&ApiInfo>) -> Cow<'a, str> {
+        if let Some(info) = api_info {
+            let ty_name = self.fmt_type_name(ty);
+            format!("{}().{}.{}", info.get_api_fn, ty_name, self.c.fmt_dtor_name(ty)).into()
+        } else {
+            format!("capi::{}", self.c.fmt_dtor_name(ty)).into()
+        }
     }
     /// Get the primitive type as a C type
     pub fn fmt_primitive_as_c(&self, prim: hir::PrimitiveType) -> Cow<'static, str> {
         self.c.fmt_primitive_as_c(prim)
+    }
+    /// Get the function type as a C type
+    pub fn fmt_function_as_c(&self, param_name: Option<&str>, output: &Cow<'_, str>, inputs: &Vec<(Cow<'_, str>, Option<Cow<'_, str>>)>) -> Cow<'_, str> {
+        self.c.fmt_function_as_c(param_name, output, inputs)
     }
 }

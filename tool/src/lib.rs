@@ -32,6 +32,13 @@ use std::path::Path;
 
 pub use ast::DocsUrlGenerator;
 
+pub struct ApiInfo<'a> {
+    pub apiname: &'a str,
+    pub refresh_api_fn: &'a str,
+    pub get_api_fn: &'a str,
+    pub additional_includes: &'a [&'a str],
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gen(
     entry: &Path,
@@ -42,6 +49,7 @@ pub fn gen(
     library_config: Option<&Path>,
     silent: bool,
     strip_prefix: Option<String>,
+    api_info: Option<ApiInfo>,
 ) -> std::io::Result<()> {
     // Check that user-provided paths exist. Exit early with a nice error message
     // if anything doesn't exist.
@@ -145,7 +153,7 @@ pub fn gen(
             };
             let files = common::FileMap::default();
             let mut context = c2::CContext::new(&tcx, files);
-            context.run();
+            context.run(api_info.as_ref());
 
             let errors = context.errors.take_all();
 
@@ -165,8 +173,8 @@ pub fn gen(
             if target_language == "cpp2" {
                 let files = common::FileMap::default();
                 let mut context = cpp2::Cpp2Context::new(&tcx, files);
-                context.run();
-                out_texts.extend(context.files.take_files());
+                context.run(api_info.as_ref());
+                out_texts.extend(context.c.files.take_files());
 
                 let errors = context.errors.take_all();
 

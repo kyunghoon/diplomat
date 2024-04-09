@@ -1,11 +1,5 @@
 use super::{
-    AttributeContext, AttributeValidator, Attrs, Borrow, BoundedLifetime, EnumDef, EnumPath,
-    EnumVariant, IdentBuf, IntType, Lifetime, LifetimeEnv, LifetimeLowerer, LookupId, MaybeOwn,
-    Method, NonOptional, OpaqueDef, OpaquePath, Optional, OutStructDef, OutStructField,
-    OutStructPath, OutType, Param, ParamLifetimeLowerer, ParamSelf, PrimitiveType,
-    ReturnLifetimeLowerer, ReturnType, ReturnableStructPath, SelfParamLifetimeLowerer, SelfType,
-    Slice, SpecialMethod, SpecialMethodPresence, StructDef, StructField, StructPath, SuccessType,
-    Type, TypeDef, TypeId,
+    AttributeContext, AttributeValidator, Attrs, Borrow, BoundedLifetime, EnumDef, EnumPath, EnumVariant, FunctionType, IdentBuf, IntType, Lifetime, LifetimeEnv, LifetimeLowerer, LookupId, MaybeOwn, Method, NonOptional, OpaqueDef, OpaquePath, Optional, OutStructDef, OutStructField, OutStructPath, OutType, Param, ParamLifetimeLowerer, ParamSelf, PrimitiveType, ReturnLifetimeLowerer, ReturnType, ReturnableStructPath, SelfParamLifetimeLowerer, SelfType, Slice, SpecialMethod, SpecialMethodPresence, StructDef, StructField, StructPath, SuccessType, Type, TypeDef, TypeId
 };
 use crate::ast::attrs::AttrInheritContext;
 use crate::{ast, Env};
@@ -701,8 +695,18 @@ impl<'ast> LoweringContext<'ast> {
                 PrimitiveType::from_ast(*prim),
             ))),
             ast::TypeName::Unit => {
-                self.errors.push(LoweringError::Other("Unit types can only appear as the return value of a method, or as the Ok/Err variants of a returned result".into()));
+                self.errors.push(LoweringError::Other("[2] Unit types can only appear as the return value of a method, or as the Ok/Err variants of a returned result".into()));
                 Err(())
+            },
+            ast::TypeName::Function(inputs, output) => {
+                let inputs = inputs.iter().map(|(ty, id)| {
+                    (self.lower_type(ty, ltl, in_path)).map(|l| (l, id.as_ref().map(|s| s.as_str().into())))
+                }).collect::<Result<Vec<_>, ()>>()?;
+                let output = match &**output {
+                    ast::TypeName::Unit => None,
+                    o => Some(self.lower_type(o, ltl, in_path)?),
+                };
+                Ok(Type::Func(Box::new(FunctionType { inputs, output })))
             }
         }
     }
@@ -928,6 +932,10 @@ impl<'ast> LoweringContext<'ast> {
             ))),
             ast::TypeName::Unit => {
                 self.errors.push(LoweringError::Other("Unit types can only appear as the return value of a method, or as the Ok/Err variants of a returned result".into()));
+                Err(())
+            },
+            ast::TypeName::Function(..) => {
+                self.errors.push(LoweringError::Other("Function types can only appear as arguments to a method".into()));
                 Err(())
             }
         }

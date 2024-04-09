@@ -22,6 +22,7 @@ pub enum Type<P: TyPosition = Everywhere> {
     Struct(P::StructPath),
     Enum(EnumPath),
     Slice(Slice),
+    Func(Box<FunctionType>),
 }
 
 /// Type that can appear in the `self` position.
@@ -88,7 +89,7 @@ impl Type {
                 (acc.0 + inner.0, acc.1 + inner.1)
             }),
             Type::Opaque(_) | Type::Slice(_) => (1, 1),
-            Type::Primitive(_) | Type::Enum(_) => (0, 0),
+            Type::Primitive(_) | Type::Enum(_) | Type::Func(_) => (0, 0),
         }
     }
 }
@@ -172,4 +173,11 @@ impl From<SelfType> for Type {
             SelfType::Enum(e) => Type::Enum(e),
         }
     }
+}
+
+/// function pointers.
+#[derive(Clone, Debug)]
+pub struct FunctionType {
+    pub inputs: Vec<(Type, Option<String>)>,
+    pub output: Option<Type>,
 }
