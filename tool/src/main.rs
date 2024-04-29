@@ -1,4 +1,5 @@
 use clap::Parser;
+use diplomat_tool::ApiInfo;
 use std::path::PathBuf;
 
 /// diplomat-tool CLI options, as parsed by [clap-derive].
@@ -34,10 +35,36 @@ struct Opt {
 
     #[clap(short = 's', long)]
     silent: bool,
+
+    #[clap()]
+    apiname: Option<String>,
+
+    #[clap()]
+    refresh_api_fn: Option<String>,
+
+    #[clap()]
+    get_api_fn: Option<String>,
+
+    #[clap()]
+    additional_includes: Option<Vec<String>>,
 }
 
 fn main() -> std::io::Result<()> {
     let opt = Opt::parse();
+
+    let additional_includes = opt.additional_includes.as_ref().map(|v| v.iter().map(|i| i.as_str()).collect::<Vec<_>>());
+
+    let api_info = match opt.apiname.as_ref().zip(opt.refresh_api_fn.as_ref()).zip(opt.get_api_fn.as_ref()).zip(additional_includes.as_ref()) {
+        None => None,
+        Some((((apiname, refresh_api_fn), get_api_fn), additional_includes)) => {
+            Some(ApiInfo {
+                apiname: apiname,
+                refresh_api_fn: refresh_api_fn,
+                get_api_fn: get_api_fn,
+                additional_includes: additional_includes.as_ref(),
+            })
+        }
+    };
 
     diplomat_tool::gen(
         &opt.entry,
@@ -67,6 +94,6 @@ fn main() -> std::io::Result<()> {
         opt.library_config.as_deref(),
         opt.silent,
         None,
-        None,
+        api_info,
     )
 }

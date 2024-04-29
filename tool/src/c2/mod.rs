@@ -30,12 +30,17 @@ namespace capi {{
 extern "C" {{
 #endif // __cplusplus
 
+struct __Core_API__ {{
+  void(*free)(void* ptr);
+}};
+
 struct {apiname}
 {{
+  __Core_API__ core;
 {members}
 }};
 
-const {apiname} {entrypoint}();
+const {apiname}* {entrypoint}();
 
 #ifdef __cplusplus
 }} // extern "C"
@@ -85,7 +90,7 @@ impl<'tcx> CContext<'tcx> {
 
         if let Some(ApiInfo { apiname, refresh_api_fn: entrypoint, .. }) = api_info { 
             let ty_names = self.tcx.all_types()
-                .filter_map(|(_, ty)| if ty.attrs().disable { None } else { Some(ty.name().as_str()) })
+                .filter_map(|(_, ty)| if ty.attrs().disable || ty.methods().is_empty() { None } else { Some(ty.name().as_str()) })
                 .collect::<Vec<_>>();
 
             self.files.add_file(

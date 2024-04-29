@@ -291,6 +291,22 @@ impl From<&syn::File> for File {
     }
 }
 
+impl From<Vec<&syn::Item>> for File {
+    fn from(items: Vec<&syn::Item>) -> File {
+        let mut out = std::collections::BTreeMap::new();
+        items.iter().for_each(|i| {
+            if let syn::Item::Mod(item_mod) = i {
+                out.insert(
+                    item_mod.ident.to_string(),
+                    Module::from_syn(item_mod, false),
+                );
+            }
+        });
+        File { modules: out }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use insta::{self, Settings};

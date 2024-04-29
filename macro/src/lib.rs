@@ -685,7 +685,6 @@ pub fn bridge(
             _ => panic!("invalid macro attribute")
         }
     });
-
     let expanded = gen_bridge(parse_macro_input!(input), apiname.zip(refresh_api_fn));
     //println!("[RUST]\n{}", expanded.to_token_stream());
     proc_macro::TokenStream::from(expanded.to_token_stream())
@@ -1103,14 +1102,6 @@ fn push_api_bridge(module: &ast::Module, new_contents: &mut Vec<Item>, apiname: 
             pub #api_field_ident : #api_struct_ident 
         }
     });
-    new_contents.push(syn::parse_quote! {
-        #[allow(non_camel_case_types)]
-        #[allow(non_snake_case)]
-        #[repr(C)]
-        pub struct #apiname {
-            #(#api_fields),*
-        }
-    });
 
     let api_field_idents = module.declared_types.values().map(|custom_type| -> FieldValue {
         let api_field_ident = Ident::new(custom_type.name().as_str(), Span::call_site());
@@ -1119,9 +1110,42 @@ fn push_api_bridge(module: &ast::Module, new_contents: &mut Vec<Item>, apiname: 
     });
 
     new_contents.push(syn::parse_quote! {
+        mod __core__ {
+            #[allow(non_camel_case_types)]
+            #[allow(non_snake_case)]
+            #[repr(C)]
+            pub struct __Core_API__ {
+                pub free: extern "C" fn(ptr: *mut std::ffi::c_void),
+            }
+
+            #[no_mangle]
+            pub extern "C" fn free(ptr: *mut std::ffi::c_void) {
+                unsafe { drop(Box::from_raw(ptr)); }
+            }
+
+            pub fn api_get_core() -> __Core_API__ {
+                __Core_API__ {
+                    free,
+                }
+            }
+        }
+    });
+
+    new_contents.push(syn::parse_quote! {
+        #[allow(non_camel_case_types)]
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        pub struct #apiname {
+            pub core: __core__::__Core_API__,
+            #(#api_fields),*
+        }
+    });
+
+    new_contents.push(syn::parse_quote! {
         #[no_mangle]
         pub extern "C" fn #rs_entrypoint() -> #apiname {
             #apiname {
+                core: __core__::api_get_core(),
                 #(#api_field_idents),*
             }
         }

@@ -3,6 +3,7 @@
 //! is primarily the AST types that Diplomat generates while
 //! extracting APIs.
 
+#![allow(unused_variables)]
 #![allow(clippy::needless_lifetimes)] // we use named lifetimes for clarity
 #![warn(clippy::exhaustive_structs, clippy::exhaustive_enums)]
 
