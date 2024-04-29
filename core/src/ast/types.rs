@@ -695,10 +695,10 @@ impl TypeName {
             }
             other@syn::Type::ImplTrait(TypeImplTrait { bounds, .. }) => {
                 let mut i = bounds.iter();
-                let Some((
-                    TypeParamBound::Trait(TraitBound { path: syn::Path { segments, .. }, .. }),
-                    TypeParamBound::Lifetime(..))) = i.next().zip(i.next()) else {
-                    panic!("Unsupported type: {}", other.to_token_stream());
+                let segments = match i.next() {
+                    Some(TypeParamBound::Trait(TraitBound { path: syn::Path { segments, .. }, .. })) =>
+                        segments,
+                    x => panic!("Unsupported type: {:#?}", x)
                 };
                 let Some(PathSegment {
                     ident,
