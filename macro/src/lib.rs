@@ -685,7 +685,6 @@ pub fn bridge(
             _ => panic!("invalid macro attribute")
         }
     });
-
     let expanded = gen_bridge(parse_macro_input!(input), apiname.zip(refresh_api_fn));
     //println!("[RUST]\n{}", expanded.to_token_stream());
     proc_macro::TokenStream::from(expanded.to_token_stream())

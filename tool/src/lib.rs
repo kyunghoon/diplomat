@@ -39,6 +39,20 @@ pub struct ApiInfo<'a> {
     pub additional_includes: &'a [&'a str],
 }
 
+/// Provide nice error messages if a folder doesn't exist.
+fn exit_if_path_missing(path: &Path, message: &str) {
+    if !path.exists() {
+        let current_dir = std::env::current_dir().expect("Filed to load current directory.");
+        eprintln!(
+            "{}{}\n{}",
+            "Error: ".red().bold(),
+            message,
+            format!("{}", Path::new(&current_dir).join(path).display()).red()
+        );
+        std::process::exit(1);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gen(
     entry: &Path,
@@ -61,6 +75,23 @@ pub fn gen(
             "The entry file does not exist."
         },
     );
+    let lib_file = syn_inline_mod::parse_and_inline_modules(entry);
+    let diplomat_file = ast::File::from(&lib_file);
+    gen_from_file(diplomat_file, target_language, out_folder, docs_out_folder, docs_url_gen, library_config, silent, strip_prefix, api_info)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gen_from_file(
+    diplomat_file: ast::File,
+    target_language: &str,
+    out_folder: &Path,
+    docs_out_folder: Option<&Path>,
+    docs_url_gen: &ast::DocsUrlGenerator,
+    library_config: Option<&Path>,
+    silent: bool,
+    strip_prefix: Option<String>,
+    api_info: Option<ApiInfo>,
+) -> std::io::Result<()> {
     exit_if_path_missing(out_folder, "The out folder does not exist.");
     if let Some(docs_out_folder) = docs_out_folder {
         exit_if_path_missing(docs_out_folder, "The docs folder does not exist.");
@@ -72,8 +103,6 @@ pub fn gen(
         );
     }
 
-    let lib_file = syn_inline_mod::parse_and_inline_modules(entry);
-    let diplomat_file = ast::File::from(&lib_file);
     let env = diplomat_file.all_types();
 
     let mut out_texts: HashMap<String, String> = HashMap::new();
@@ -250,18 +279,4 @@ pub fn gen(
     }
 
     Ok(())
-}
-
-/// Provide nice error messages if a folder doesn't exist.
-fn exit_if_path_missing(path: &Path, message: &str) {
-    if !path.exists() {
-        let current_dir = std::env::current_dir().expect("Filed to load current directory.");
-        eprintln!(
-            "{}{}\n{}",
-            "Error: ".red().bold(),
-            message,
-            format!("{}", Path::new(&current_dir).join(path).display()).red()
-        );
-        std::process::exit(1);
-    }
 }
